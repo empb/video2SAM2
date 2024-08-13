@@ -87,9 +87,11 @@ def frames_from_folder(folder):
     frame_names.sort(key=lambda p: int(os.path.splitext(p)[0]))
     # Read all frames
     frames = []
-    for frame_name in frame_names:
+    l = len(frame_names)
+    for i, frame_name in enumerate(frame_names):
         frame = cv2.imread(os.path.join(folder, frame_name))
         frames.append(frame)
+        printProgressBar(i + 1, l, prefix = 'Frames:     ', suffix = 'completed', length = 40)
     return frames
 
 # Read colors from file:
@@ -419,7 +421,7 @@ def navigate_frames(frames, label_colors, sam_predictor, backup_folder, temp_fol
     update_frame(0, True, False, False)
 
     # Screen loop
-    propagation_length = 100
+    propagation_length, propagation_changed = 400, False
     inf_state_init_frame, inference_state = 0, None
     print_console(current_label, label_colors, current_frame, total_frames, propagation_length)
     while True:
@@ -478,19 +480,31 @@ def navigate_frames(frames, label_colors, sam_predictor, backup_folder, temp_fol
             current_label = labels_list[(labels_list.index(current_label) + 1) % len(labels_list)]
             update_frame(current_frame, show_mask, show_bboxes, show_instances)
             print_console(current_label, label_colors, current_frame, total_frames, propagation_length)
-        elif key == ord('f') or key == ord('p'):   # Call SAM 2
+        elif (key == ord('f') or key == ord('p')) and positive_points[current_frame] != []:   # Call SAM 2
             # 1. REDFINE THE INFERENCE STATE IF NECESSARY
             # If it is not defined / if current frame is not in the range / 
             # if state initial frame is not equal the current frame
             if (inference_state is None or
-                (key == ord('f') and not (inf_state_init_frame <= current_frame < inf_state_init_frame + propagation_length)) or
-                (key == ord('p') and inf_state_init_frame != current_frame)):
+                (key == ord('f') and not (inf_state_init_frame <= current_frame < inf_state_init_frame + propagation_length)) 
+                or (key == ord('p') and (inf_state_init_frame != current_frame or propagation_changed))):
                 # Redefine the inference state
                 inf_state_init_frame = current_frame
                 t0 = time.time()
+                propagation_changed = False
                 print('> Establishing inference state for SAM 2...')
-                inference_state = create_SAM_inference_state(sam_predictor, temp_folder,
-                        current_frame, min(current_frame + propagation_length, total_frames-1))
+                del inference_state # for releasing space
+                try:
+                    inference_state = create_SAM_inference_state(sam_predictor, temp_folder,
+                            current_frame, min(current_frame + propagation_length, total_frames-1))
+                except RuntimeError as e:
+                    if 'out of memory' in str(e):
+                        error_lines = str(e).strip().split('\n')
+                        last_line = error_lines[-1] if error_lines else 'No additional info available.'
+                        print(text_color(last_line, error_color=True))
+                        inference_state = None
+                        torch.cuda.empty_cache()
+                        continue
+                    else:   raise e     # Another error
                 print(f'  Inference state established in {time.time() - t0:.2f} seconds.')
             # 2. ADD THE NEW POINTS TO THE PREDICTOR
             print('> Calling SAM 2 for frame ' + str(current_frame) + '...')
@@ -499,14 +513,14 @@ def navigate_frames(frames, label_colors, sam_predictor, backup_folder, temp_fol
                 current_frame-inf_state_init_frame, positive_points[current_frame], negative_points[current_frame])
             print(f'  Done! Frame segmented in {time.time() - t0:.2f} seconds.')
             # 3.1 IF ONLY FOR CURRENT FRAME, SAVE THE MASKS
-            if key == ord('f'):
+            if key == ord('f') and boolean_masks != None:
                 # Save the masks
                 for label in boolean_masks.keys():
                     append_mask_in_lists(boolean_masks[label], label, current_frame)
                 # Clear the points
                 positive_points[current_frame] = []
                 negative_points[current_frame] = []
-            else:   # 3.2 IF PROPAGATION, SHOW THE MASKS TO CONFIRM PROPAGATION
+            elif boolean_masks != None:   # 3.2 IF PROPAGATION, SHOW THE MASKS TO CONFIRM PROPAGATION
                 # Create the RGB mask
                 rgb_mask = np.zeros((H_frame, W_frame, 3), dtype=np.uint8)
                 for label in boolean_masks.keys():
@@ -526,18 +540,23 @@ def navigate_frames(frames, label_colors, sam_predictor, backup_folder, temp_fol
                     t0 = time.time()
                     # Call the SAM 2 propagation function
                     video_segments = sam2_prompt_propagation(sam_predictor, inference_state, objects_list)
-                    for num_frame in video_segments.keys():
-                        boolean_masks = video_segments[num_frame]
-                        for label in boolean_masks.keys():
-                            append_mask_in_lists(boolean_masks[label], label, num_frame+inf_state_init_frame)
                     print(f'  Done! {propagation_length} frames segmented in {time.time() - t0:.2f} seconds.')
-                    # Remove ALL the points
-                    positive_points = [[] for _ in range(total_frames)]
-                    negative_points = [[] for _ in range(total_frames)]
+                    if video_segments != None:
+                        print('  Saving mask...')
+                        for num_frame in video_segments.keys():
+                            boolean_masks = video_segments[num_frame]
+                            for label in boolean_masks.keys():
+                                append_mask_in_lists(boolean_masks[label], label, num_frame+inf_state_init_frame)
+                        print('  ... done!')
+                        # Remove ALL the points
+                        positive_points = [[] for _ in range(total_frames)]
+                        negative_points = [[] for _ in range(total_frames)]
                 else:   # If ESC, cancel the propagation
                     print(text_color('  Propagation canceled. Discarding the masks.', error_color=True))
             # Reset the inference state (just for reseting tracking)
             sam_predictor.reset_state(inference_state)
+            # Clear torch cache
+            torch.cuda.empty_cache()
             # Update the frame
             update_frame(current_frame, show_mask, show_bboxes, show_instances)
         elif key == ord('v'):   # Show/hide mask
@@ -553,15 +572,19 @@ def navigate_frames(frames, label_colors, sam_predictor, backup_folder, temp_fol
             save_masks(backup_folder, masks, instances, bboxes, label_colors, is_backup=True)
         elif key == ord('+'):   # Increase propation length by 1
             propagation_length += 1
+            propagation_changed = True
             print_console(current_label, label_colors, current_frame, total_frames, propagation_length)
         elif key == ord('-'):   # Decrease propation length by 1
             propagation_length = max(1, propagation_length - 1)
+            propagation_changed = True
             print_console(current_label, label_colors, current_frame, total_frames, propagation_length)
         elif key == ord('*'):   # Increase propation length by 30
             propagation_length += 30
+            propagation_changed = True
             print_console(current_label, label_colors, current_frame, total_frames, propagation_length)
         elif key == ord('_'):   # Decrease propation length by 30
             propagation_length = max(1, propagation_length - 30)
+            propagation_changed = True
             print_console(current_label, label_colors, current_frame, total_frames, propagation_length)
         elif key == ord('d'):   # Just for debugging
             print(np.unique(instances[current_frame]))
@@ -606,21 +629,32 @@ def sam2_add_new_points(sam_predictor, inference_state, label_colors, frame_idx,
         if pp != []:
             pn = [point[0] for point in negative_points_frame if point[1] == label]
             # Calling the SAM 2 predictor
-            _, out_obj_ids, out_mask_logits = sam_predictor.add_new_points(
-                inference_state=inference_state,
-                frame_idx=frame_idx,
-                obj_id=nl,  # obj_id is the index of the label in the list of labels
-                points=np.array(pp + pn),
-                labels=np.array([1]*len(pp) + [0]*len(pn)),
-            )
+            try:
+                _, out_obj_ids, out_mask_logits = sam_predictor.add_new_points(
+                    inference_state=inference_state,
+                    frame_idx=frame_idx,
+                    obj_id=nl,  # obj_id is the index of the label in the list of labels
+                    points=np.array(pp + pn),
+                    labels=np.array([1]*len(pp) + [0]*len(pn)))
+            except RuntimeError as e:
+                if 'out of memory' in str(e):
+                    error_lines = str(e).strip().split('\n')
+                    last_line = error_lines[-1] if error_lines else 'No additional info available.'
+                    print(text_color(last_line, error_color=True))
+                    torch.cuda.empty_cache()
+                    return None, None
+                else:   raise e     # Another error
+                
     # The result of the last call is a list of masks for each object
-    bool_masks = {}
     if out_obj_ids:
+        bool_masks = {}
         h, w = inference_state['video_height'], inference_state['video_width']
         for i, out_obj_id in enumerate(out_obj_ids):
             bool_mask = (out_mask_logits[i] > 0.0).cpu().numpy().reshape(h, w, 1).squeeze()
             bool_masks[objects_list[out_obj_id]] = bool_mask
-    return bool_masks, objects_list
+        return bool_masks, objects_list
+    else:
+        return None, None
 
 # Function to propagate the mask in the video. Returns a dict of boolean mask per frame.
 # The boolean mask are stored in a dict, where keys are string labels and values are the mask
@@ -629,10 +663,19 @@ def sam2_prompt_propagation(sam_predictor, inference_state, objects_list):
     h, w = inference_state['video_height'], inference_state['video_width']
     # Call the SAM 2 propagation function
     for out_frame_idx, out_obj_ids, out_mask_logits in sam_predictor.propagate_in_video(inference_state):
-        video_segments[out_frame_idx] = {
-            objects_list[out_obj_id]: (out_mask_logits[i] > 0.0).cpu().numpy().reshape(h, w, 1).squeeze()
-            for i, out_obj_id in enumerate(out_obj_ids)
-        }
+        try:
+            video_segments[out_frame_idx] = {
+                objects_list[out_obj_id]: (out_mask_logits[i] > 0.0).cpu().numpy().reshape(h, w, 1).squeeze()
+                for i, out_obj_id in enumerate(out_obj_ids)
+            }
+        except RuntimeError as e:
+            if 'out of memory' in str(e):
+                error_lines = str(e).strip().split('\n')
+                last_line = error_lines[-1] if error_lines else 'No additional info available.'
+                print(text_color(last_line, error_color=True))
+                torch.cuda.empty_cache()
+                return None
+            else:   raise e     # Another error
     return video_segments
 
 
