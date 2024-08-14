@@ -16,6 +16,9 @@ import zipfile
 # The following environment variable is needed because otherwise SAM pytorch model 
 # present racing conditions on some CUDA kernel executions (06/07/2024):
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+# This might help avoid memory fragmentation
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 
 # Slow imports (only loaded if needed; take a few seconds to be loaded):
 def make_slow_imports():
@@ -91,7 +94,7 @@ def frames_from_folder(folder):
     for i, frame_name in enumerate(frame_names):
         frame = cv2.imread(os.path.join(folder, frame_name))
         frames.append(frame)
-        printProgressBar(i + 1, l, prefix = 'Frames:     ', suffix = 'completed', length = 40)
+        printProgressBar(i+1, l, prefix = 'Frames:     ', suffix = 'completed', length = 40)
     return frames
 
 # Read colors from file:
@@ -132,12 +135,12 @@ def load_masks(folder):
     l = len(filenames_mask)
     for i, file in enumerate(filenames_mask):
         masks.append(cv2.cvtColor(cv2.imread(folder_sem + file), cv2.COLOR_BGR2RGB))
-        printProgressBar(i + 1, l, prefix = 'Segm. masks:', suffix = 'completed', length = 40)
+        printProgressBar(i+1, l, prefix = 'Segm. masks:', suffix = 'completed', length = 40)
     l = len(filenames_mask)
     for i, file in enumerate(filenames_inst):
         # instances must be (H, W, 1) and not (H, W, 3)
         instances.append(cv2.imread(folder_inst + file, cv2.IMREAD_GRAYSCALE))
-        printProgressBar(i + 1, l, prefix = 'Inst. masks:', suffix = 'completed', length = 40)
+        printProgressBar(i+1, l, prefix = 'Inst. masks:', suffix = 'completed', length = 40)
     # convert (H, W) to (H, W, 1)
     instances = [np.expand_dims(inst, axis=2) for inst in instances]
     print('    ... done!')
@@ -158,7 +161,7 @@ def save_masks(folder, sem_masks, instances, bboxes, label_colors, is_backup=Fal
     l = len(sem_masks)
     for i, mask in enumerate(sem_masks):
         cv2.imwrite(folder_sem + f'frame_{i:06d}.png', cv2.cvtColor(mask, cv2.COLOR_RGB2BGR))
-        printProgressBar(i + 1, l, prefix = 'Segm. masks:', suffix = 'completed', length = 40)
+        printProgressBar(i+1, l, prefix = 'Segm. masks:', suffix = 'completed', length = 40)
     # Save the instance masks
     folder_inst = folder + 'instance/'
     if not os.path.exists(folder_inst): os.makedirs(folder_inst)
@@ -166,7 +169,7 @@ def save_masks(folder, sem_masks, instances, bboxes, label_colors, is_backup=Fal
     for i, mask in enumerate(instances):
         # Convert from grayscale in 8 bits to 16 bits grayscale
         cv2.imwrite(folder_inst + f'frame_{i:06d}.png', np.array(mask, dtype=np.uint16)*256)
-        printProgressBar(i + 1, l, prefix = 'Inst. masks:', suffix = 'completed', length = 40)
+        printProgressBar(i+1, l, prefix = 'Inst. masks:', suffix = 'completed', length = 40)
     # Save the bboxes
     folder_bboxes = folder + 'bboxes/'
     if not os.path.exists(folder_bboxes): os.makedirs(folder_bboxes)
@@ -179,7 +182,7 @@ def save_masks(folder, sem_masks, instances, bboxes, label_colors, is_backup=Fal
                 (x, y, w, h), color, inst_id = bbox
                 label = colors_labels[color]
                 f.write(f'{label} {inst_id} {x} {y} {w} {h}\n')
-        printProgressBar(i + 1, l, prefix = 'Bboxes     :', suffix = 'completed', length = 40)
+        printProgressBar(i+1, l, prefix = 'Bboxes     :', suffix = 'completed', length = 40)
     print('    ... done!')
 
 # Create a zip file with the KITTI format
@@ -282,6 +285,7 @@ def print_console(current_label, label_colors, current_frame, total_frames, prop
     [c]: Clear current label points for current frame
     [a]: Clear all points for all frames
     [r]: Reset mask for current label and frame
+    [n]: Reset mask for current label and all next frames
         
     [f]: Call SAM 2 for current frame
     [p]: Propagate mask for current label
@@ -333,6 +337,13 @@ def printProgressBar(iteration, total, prefix = '', suffix = '', decimals = 1, l
     # Print New Line on Complete
     if iteration == total:
         print()
+
+# Function for printing CUDA out of memory error
+def print_out_of_memory_error(e):
+    error_lines = str(e).strip().split('\n')
+    last_line = error_lines[-1] if error_lines else 'No additional info available.'
+    print(text_color(last_line, error_color=True))
+    print(text_color('Try to reduce the \'Prompt progation\' length. In my case, using an 8GB GPU with the large model for 1080x1920 images and segmentation across 8 classes, a value of 250 for this parameter works well.'))
 
 ##########################################################################
 # OpenCV window management
@@ -421,7 +432,7 @@ def navigate_frames(frames, label_colors, sam_predictor, backup_folder, temp_fol
     update_frame(0, True, False, False)
 
     # Screen loop
-    propagation_length, propagation_changed = 400, False
+    propagation_length, propagation_changed = 250, False
     inf_state_init_frame, inference_state = 0, None
     print_console(current_label, label_colors, current_frame, total_frames, propagation_length)
     while True:
@@ -444,29 +455,35 @@ def navigate_frames(frames, label_colors, sam_predictor, backup_folder, temp_fol
             current_frame = min(total_frames - 1, current_frame + 10)
             print_console(current_label, label_colors, current_frame, total_frames, propagation_length)
             update_frame(current_frame, show_mask, show_bboxes, show_instances)
-        elif key == ord('r'):  # Reset mask for current label and frame
-            # When color is equal to label_color[current_label], set it to (0, 0, 0)
-            mask_bool = np.all(masks[current_frame] == label_colors[current_label], axis=2)
-            masks[current_frame][mask_bool] = (0, 0, 0)
-            # Remove instances from the mask
-            instances2delete = [bbox[2] for bbox in bboxes[current_frame] if bbox[1] == label_colors[current_label]]
-            for inst in instances2delete:
-                instances[current_frame][instances[current_frame] == inst] = 0
-            # Adjust the instances numbers
-            instances_copy = instances[current_frame].copy()
-            for inst in instances2delete:
-                instances[current_frame][instances_copy > inst] -= 1
-            # Remove bboxes too
-            new_bboxes = []
-            for bbox in bboxes[current_frame]:
-                if bbox[1] != label_colors[current_label]: # if bbox is not from the current label
-                    # Upadate the instance id
-                    nbbox = bbox
+        elif key == ord('r') or key == ord('n'):  # Reset masks
+            if key == ord('r'): processed_frames = [current_frame]
+            else: processed_frames = list(range(current_frame, total_frames))
+            l = len(processed_frames)
+            for i in processed_frames:
+                # Remove instances from the mask
+                instances2delete = [bbox[2] for bbox in bboxes[i] if bbox[1] == label_colors[current_label]]
+                printProgressBar(i+1-processed_frames[0], l, prefix = 'Reseting:   ', suffix = 'completed', length = 40)
+                if instances2delete != []:
                     for inst in instances2delete:
-                        if bbox[2] > inst:
-                            nbbox = ((nbbox[0][0], nbbox[0][1], nbbox[0][2], nbbox[0][3]), nbbox[1], nbbox[2]-1)
-                    new_bboxes.append(nbbox)
-            bboxes[current_frame] = new_bboxes
+                        instances[i][instances[i] == inst] = 0
+                    # Adjust the instances numbers
+                    instances_copy = instances[i].copy()
+                    for inst in instances2delete:
+                        instances[i][instances_copy > inst] -= 1
+                    # When color is equal to label_color[current_label], set it to (0, 0, 0)
+                    mask_bool = np.all(masks[i] == label_colors[current_label], axis=2)
+                    masks[i][mask_bool] = (0, 0, 0)
+                    # Remove bboxes too
+                    new_bboxes = []
+                    for bbox in bboxes[i]:
+                        if bbox[1] != label_colors[current_label]: # if bbox is not from the current label
+                            # Upadate the instance id
+                            nbbox = bbox
+                            for inst in instances2delete:
+                                if bbox[2] > inst:
+                                    nbbox = ((nbbox[0][0], nbbox[0][1], nbbox[0][2], nbbox[0][3]), nbbox[1], nbbox[2]-1)
+                            new_bboxes.append(nbbox)
+                    bboxes[i] = new_bboxes
             update_frame(current_frame, show_mask, show_bboxes, show_instances)
         elif key == ord('a'):  # Clear all points for all frames
             positive_points = [[] for _ in range(total_frames)]
@@ -498,9 +515,7 @@ def navigate_frames(frames, label_colors, sam_predictor, backup_folder, temp_fol
                             current_frame, min(current_frame + propagation_length, total_frames-1))
                 except RuntimeError as e:
                     if 'out of memory' in str(e):
-                        error_lines = str(e).strip().split('\n')
-                        last_line = error_lines[-1] if error_lines else 'No additional info available.'
-                        print(text_color(last_line, error_color=True))
+                        print_out_of_memory_error(e)
                         inference_state = None
                         torch.cuda.empty_cache()
                         continue
@@ -530,8 +545,9 @@ def navigate_frames(frames, label_colors, sam_predictor, backup_folder, temp_fol
                 cv2.namedWindow('Press any key to confirm, [ESC] to cancel', flags=cv2.WINDOW_NORMAL | cv2.WINDOW_GUI_NORMAL)
                 cv2.moveWindow('Press any key to confirm, [ESC] to cancel', x, y)
                 cv2.resizeWindow('Press any key to confirm, [ESC] to cancel', width, height)
-                frame_masked = add_frame_mask(frames[current_frame].copy(), rgb_mask)
-                cv2.imshow('Press any key to confirm, [ESC] to cancel', np.hstack((frame_masked, rgb_mask)))
+                bgr_mask = cv2.cvtColor(rgb_mask, cv2.COLOR_RGB2BGR)
+                frame_masked = add_frame_mask(frames[current_frame].copy(), bgr_mask)
+                cv2.imshow('Press any key to confirm, [ESC] to cancel', np.hstack((frame_masked, bgr_mask)))
                 print(text_color('> Do you want to propagate the masks?'))
                 print(text_color('  Press any key to confirm, [ESC] to cancel'))
                 conf_key = cv2.waitKey(0) & 0xFF
@@ -542,12 +558,13 @@ def navigate_frames(frames, label_colors, sam_predictor, backup_folder, temp_fol
                     video_segments = sam2_prompt_propagation(sam_predictor, inference_state, objects_list)
                     print(f'  Done! {propagation_length} frames segmented in {time.time() - t0:.2f} seconds.')
                     if video_segments != None:
-                        print('  Saving mask...')
-                        for num_frame in video_segments.keys():
+                        print('  Extracting masks...')
+                        l = len(video_segments.keys())
+                        for i, num_frame in enumerate(video_segments.keys()):
                             boolean_masks = video_segments[num_frame]
                             for label in boolean_masks.keys():
                                 append_mask_in_lists(boolean_masks[label], label, num_frame+inf_state_init_frame)
-                        print('  ... done!')
+                            printProgressBar(i+1, l, prefix = 'Masks:      ', suffix = 'completed', length = 40)
                         # Remove ALL the points
                         positive_points = [[] for _ in range(total_frames)]
                         negative_points = [[] for _ in range(total_frames)]
@@ -638,9 +655,7 @@ def sam2_add_new_points(sam_predictor, inference_state, label_colors, frame_idx,
                     labels=np.array([1]*len(pp) + [0]*len(pn)))
             except RuntimeError as e:
                 if 'out of memory' in str(e):
-                    error_lines = str(e).strip().split('\n')
-                    last_line = error_lines[-1] if error_lines else 'No additional info available.'
-                    print(text_color(last_line, error_color=True))
+                    print_out_of_memory_error(e)
                     torch.cuda.empty_cache()
                     return None, None
                 else:   raise e     # Another error
@@ -661,21 +676,21 @@ def sam2_add_new_points(sam_predictor, inference_state, label_colors, frame_idx,
 def sam2_prompt_propagation(sam_predictor, inference_state, objects_list):
     video_segments = {}  # Contains the per-frame segmentation results
     h, w = inference_state['video_height'], inference_state['video_width']
-    # Call the SAM 2 propagation function
-    for out_frame_idx, out_obj_ids, out_mask_logits in sam_predictor.propagate_in_video(inference_state):
-        try:
-            video_segments[out_frame_idx] = {
-                objects_list[out_obj_id]: (out_mask_logits[i] > 0.0).cpu().numpy().reshape(h, w, 1).squeeze()
-                for i, out_obj_id in enumerate(out_obj_ids)
-            }
-        except RuntimeError as e:
-            if 'out of memory' in str(e):
-                error_lines = str(e).strip().split('\n')
-                last_line = error_lines[-1] if error_lines else 'No additional info available.'
-                print(text_color(last_line, error_color=True))
-                torch.cuda.empty_cache()
-                return None
-            else:   raise e     # Another error
+    try:
+        # Clear torch CUDA memory
+        torch.cuda.empty_cache()
+        # Call the SAM 2 propagation function
+        for out_frame_idx, out_obj_ids, out_mask_logits in sam_predictor.propagate_in_video(inference_state):
+                video_segments[out_frame_idx] = {
+                    objects_list[out_obj_id]: (out_mask_logits[i] > 0.0).cpu().numpy().reshape(h, w, 1).squeeze()
+                    for i, out_obj_id in enumerate(out_obj_ids)
+                }
+    except RuntimeError as e:
+        if 'out of memory' in str(e):
+            print_out_of_memory_error(e)
+            torch.cuda.empty_cache()
+            return None
+        else:   raise e     # Another error
     return video_segments
 
 
@@ -683,7 +698,8 @@ def sam2_prompt_propagation(sam_predictor, inference_state, objects_list):
 # Image processing functions
 ##########################################################################
 
-# Add the mask to the frame
+# Add the mask to the frame. 
+# Mask must be in BGR color space and the result is in BGR too
 def add_frame_mask(frame, mask):
     # Convert mask to 3 channels if needed
     if mask.shape[:2] == 1:
