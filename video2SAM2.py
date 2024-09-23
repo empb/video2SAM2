@@ -807,7 +807,7 @@ if __name__ == '__main__':
 
     # 4. Initialize the SAM model:
     make_slow_imports()
-    sam_predictor = init_SAM_predictor(args.sam_model_folder, model_size='large')
+    sam_predictor = init_SAM_predictor(args.sam_model_folder, args.model_size)
     # Create the temporal folder for the inference state
     TEMP_FOLDER = 'temp/'
     create_temp_folder(args.input_folder, TEMP_FOLDER)
