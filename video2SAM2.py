@@ -554,7 +554,6 @@ def navigate_frames(frames, frame_names, init_video_frame, label_colors, sam_pre
                 # Create the RGB mask
                 rgb_mask = np.zeros((H_frame, W_frame, 3), dtype=np.uint8)
                 for label in boolean_masks.keys():
-                    print(rgb_mask.shape, boolean_masks[label].shape)
                     rgb_mask[boolean_masks[label]] = label_colors[label]
                 # Show it in new window ABOVE the main window
                 x, y, width, height = cv2.getWindowImageRect('Video')
