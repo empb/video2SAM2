@@ -9,7 +9,9 @@ The program parameters are:
 ```
 video2SAM2.py [-h] --input_folder INPUT_FOLDER [--label_colors LABEL_COLORS]
                      [--load_folder LOAD_FOLDER] [--output_folder OUTPUT_FOLDER]
-                     [--backup_folder BACKUP_FOLDER] [--sam_model_folder SAM_MODEL_FOLDER]
+                     [--backup_folder BACKUP_FOLDER] [--resize_factor RESIZE_FACTOR] 
+                     [--init_frame INIT_FRAME] [--end_frame END_FRAME] 
+                     [--sam_model_folder SAM_MODEL_FOLDER]
                      [--model_size {tiny,small,base_plus,large}]
 ```
 
@@ -26,6 +28,9 @@ video2SAM2.py [-h] --input_folder INPUT_FOLDER [--label_colors LABEL_COLORS]
 * **--label_colors**: File containing the class and color information (in RGB) for segmentation. Default is `label_colors.txt`. It follows the [KITTI labeling format](https://docs.cvat.ai/docs/manual/advanced/formats/format-kitti/).
 * **--output_folder**: Directory where masks can be saved at the end of the program. Default is `annotations/`.
 * **--backup_folder**: Directory where backup copies of the work can be stored. Default is `backups/`.
+* **--resize_factor**: Value in $\(0, 1\]$. The dimensions of the image are multiplied by this factor, and a smaller image is used.
+* **--init_frame**: Initial frame of the video to process, including this value. Default: $0$.
+* **--end_frame**: Final frame of the video, including this value. Value $-1$ for the entire video. Default: $-1$.
 * **--sam_model_folder**: Directory where the SAM model is loaded/saved. Default is `models/`.
 * **--model_size**: Model sizes of SAM 2 model. Possible values are tiny, small, base_plus, or large.
 
@@ -52,7 +57,9 @@ Los parámetros del programa son:
 ```
 video2SAM2.py [-h] --input_folder INPUT_FOLDER [--label_colors LABEL_COLORS]
                      [--load_folder LOAD_FOLDER] [--output_folder OUTPUT_FOLDER]
-                     [--backup_folder BACKUP_FOLDER] [--sam_model_folder SAM_MODEL_FOLDER]
+                     [--backup_folder BACKUP_FOLDER] [--resize_factor RESIZE_FACTOR] 
+                     [--init_frame INIT_FRAME] [--end_frame END_FRAME] 
+                     [--sam_model_folder SAM_MODEL_FOLDER]
                      [--model_size {tiny,small,base_plus,large}]
 ```
 
@@ -69,6 +76,9 @@ video2SAM2.py [-h] --input_folder INPUT_FOLDER [--label_colors LABEL_COLORS]
 * **--label_colors**: Archivo que contiene la información de clase y color (en RGB) para la segmentación. El valor predeterminado es `label_colors.txt`. Sigue el formato de etiquetado [KITTI](https://docs.cvat.ai/docs/manual/advanced/formats/format-kitti/).
 * **--output_folder**: Directorio donde se pueden guardar las máscaras al final del programa. El valor predeterminado es `annotations/`.
 * **--backup_folder**: Directorio donde se pueden almacenar copias de seguridad del trabajo. El valor predeterminado es `backups/`.
+* **--resize_factor**: Valor en $\(0, 1\]$. Las dimensiones de la imagen se multiplican por este factor y se trabaja con una imagen más pequeña.
+* **--init_frame**: Frame inicial del video, incluyendo este valor. Por defecto: $0$.
+* **--end_frame**: Frame final del video, incluyendo este valor. Valor $-1$ para el video completo. Por defecto: $-1$.
 * **--sam_model_folder**: Directorio donde se carga/guarda el modelo SAM. El valor predeterminado es `models/`.
 * **--model_size**: Tamaño del modelo de SAM 2. Los posibles valores son tiny, small, base_plus o large.
 

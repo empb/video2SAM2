@@ -18,6 +18,8 @@ import zipfile
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 # This might help avoid memory fragmentation
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+# Temporary folder for the SAM video tracking
+TEMP_FOLDER = 'temp/'
 
 
 # Slow imports (only loaded if needed; take a few seconds to be loaded):
@@ -75,27 +77,36 @@ def parse_arguments():
     parser.add_argument('--load_folder', type=str, default='annotations/', help='Folder with masks to load')
     parser.add_argument('--output_folder', type=str, default='annotations/', help='Output folder for masks')
     parser.add_argument('--backup_folder', type=str, default='backups/', help='Folder for backups')
+    parser.add_argument('--resize_factor', type=float, default=1.0, help='Resize factor for the frames')
+    parser.add_argument('--init_frame', type=int, default=0, help='Initial frame for the video (inclusive)')
+    parser.add_argument('--end_frame', type=int, default=-1, help='End frame for the video (inclusive)')
     parser.add_argument('--sam_model_folder', type=str, default='models/', help='Folder to store/load the SAM 2 model')
     parser.add_argument('--model_size', type=str, choices=['tiny', 'small', 'base_plus', 'large'], default='large', help='Select the size of the SAM 2 model: tiny, small, base_plus, or large')
     args = parser.parse_args()
     return args
 
-# Frame reading from folder:
-def frames_from_folder(folder):
+# Frame reading from folder. Returns frame names and frames:
+def frames_from_folder(folder, resize_factor, init_frame, end_frame):
     # Scan all the JPEG frame names in this directory
     frame_names = [
         p for p in os.listdir(folder)
         if os.path.splitext(p)[-1] in [".jpg", ".jpeg", ".JPG", ".JPEG"]
     ]
     frame_names.sort(key=lambda p: int(os.path.splitext(p)[0]))
+    if end_frame == -1: end_frame = len(frame_names) - 1
+    frame_names = frame_names[init_frame:end_frame+1]
     # Read all frames
     frames = []
     l = len(frame_names)
     for i, frame_name in enumerate(frame_names):
         frame = cv2.imread(os.path.join(folder, frame_name))
+        if resize_factor != 1.0:
+            frame = cv2.resize(frame, (0, 0), fx=resize_factor, fy=resize_factor)
         frames.append(frame)
         printProgressBar(i+1, l, prefix = 'Frames:     ', suffix = 'completed', length = 40)
-    return frames
+    # Remove the extension from the frame names
+    frame_names = [os.path.splitext(p)[0] for p in frame_names]
+    return frame_names, frames
 
 # Read colors from file:
 # return a list with the order of the labels (to identify each label with an integer)
@@ -114,79 +125,94 @@ def labels_colors_from_file(file_path):
     return label_order, labels
 
 # Load masks from folder:
-def load_masks(folder):
-    if not os.path.exists(folder + 'semantic_rgb/') or not os.path.exists(folder + 'instance/'):
+def load_masks(folder, frame_shape, frame_names):
+    semantic_folder = os.path.join(folder, 'semantic_rgb/')
+    instance_folder = os.path.join(folder, 'instance/')
+    if not os.path.exists(semantic_folder) or not os.path.exists(instance_folder):
         print(f'! Error: Folder {folder} does not contain semantic_rgb/ or instance/ subfolders'), 
         return None, None
-    if folder[-1] != '/': folder += '/'
-    # Take all the files in the folder
-    filenames_mask = os.listdir(folder + 'semantic_rgb/')
-    filenames_mask.sort()
-    filenames_inst = os.listdir(folder + 'instance/')
-    filenames_inst.sort()
-    if len(filenames_mask) != len(filenames_inst):
-        print(f'! Error: Number of semantic and instance masks do not match ({len(filenames_mask)} != {len(filenames_inst)})')
-        return None, None
 
+    # Check if mask and frame shape are the same
+    mask0 = cv2.imread(os.path.join(semantic_folder, f'frame_{frame_names[0]}.png'))
+    inst0 = cv2.imread(os.path.join(instance_folder, f'frame_{frame_names[0]}.png'), cv2.IMREAD_GRAYSCALE)
+    if mask0.shape[:2] != frame_shape:
+        print(f'! Error: Frame shape {frame_shape} and mask shape {mask0.shape[:2]} do not match.')
+        return None, None
+    elif inst0.shape[:2] != frame_shape:
+        print(f'! Error: Frame shape {frame_shape} and instance shape {inst0.shape[:2]} do not match.')
+        return None, None
+    
     # Load the masks and instances
     print(f'    Loading masks from {folder}... ')
     masks, instances = [], []
-    folder_sem, folder_inst = folder + 'semantic_rgb/', folder + 'instance/'
-    l = len(filenames_mask)
-    for i, file in enumerate(filenames_mask):
-        masks.append(cv2.cvtColor(cv2.imread(folder_sem + file), cv2.COLOR_BGR2RGB))
-        printProgressBar(i+1, l, prefix = 'Segm. masks:', suffix = 'completed', length = 40)
-    l = len(filenames_mask)
-    for i, file in enumerate(filenames_inst):
-        # instances must be (H, W, 1) and not (H, W, 3)
-        instances.append(cv2.imread(folder_inst + file, cv2.IMREAD_GRAYSCALE))
-        printProgressBar(i+1, l, prefix = 'Inst. masks:', suffix = 'completed', length = 40)
+    l = len(frame_names)
+    for i, file in enumerate(frame_names):
+        sem_frame_path = os.path.join(semantic_folder, f'frame_{file}.png')
+        if not os.path.exists(sem_frame_path):
+            print(f'! Error: File {sem_frame_path} does not exist.')
+            return None, None
+        masks.append(cv2.cvtColor(cv2.imread(sem_frame_path), cv2.COLOR_BGR2RGB))
+        # Instances must be (H, W, 1) and not (H, W, 3)
+        inst_frame_path = os.path.join(instance_folder, f'frame_{file}.png')
+        if not os.path.exists(inst_frame_path):
+            print(f'! Error: File {inst_frame_path} does not exist.')
+            return None, None
+        instances.append(cv2.imread(inst_frame_path, cv2.IMREAD_GRAYSCALE))
+
+        printProgressBar(i+1, l, prefix = 'Loaded masks:', suffix = 'completed', length = 40)
+       
     # convert (H, W) to (H, W, 1)
     instances = [np.expand_dims(inst, axis=2) for inst in instances]
     print('    ... done!')
     return masks, instances
 
 # Save masks in folder:
-def save_masks(folder, sem_masks, instances, bboxes, label_colors, is_backup=False):
-    if folder[-1] != '/': folder += '/'
+def save_masks(folder, frame_names, sem_masks, instances, bboxes, label_colors, is_backup=False):
     # If is a backup create a subfolder with time
-    if is_backup:   folder += time.strftime('%Y%m%d_%H%M%S') + '/'
+    if is_backup:   
+        folder = os.path.join(folder, time.strftime('%Y%m%d_%H%M%S') + '/')
     elif os.path.exists(folder):        # if is not a backup and folder exists, clear the files
         os.system(f'rm -r {folder}*')
     # Loop over masks and save them
     print(f'Saving masks in {folder}... ')
     # Save the semantic masks
-    folder_sem = folder + 'semantic_rgb/'
-    if not os.path.exists(folder_sem): os.makedirs(folder_sem)
+    semantic_folder = os.path.join(folder, 'semantic_rgb/')
+    if not os.path.exists(semantic_folder): os.makedirs(semantic_folder)
     l = len(sem_masks)
-    for i, mask in enumerate(sem_masks):
-        cv2.imwrite(folder_sem + f'frame_{i:06d}.png', cv2.cvtColor(mask, cv2.COLOR_RGB2BGR))
+    i = 0
+    for name, mask in zip(frame_names, sem_masks):
+        cv2.imwrite(semantic_folder + f'frame_{name}.png', cv2.cvtColor(mask, cv2.COLOR_RGB2BGR))
         printProgressBar(i+1, l, prefix = 'Segm. masks:', suffix = 'completed', length = 40)
+        i += 1
     # Save the instance masks
-    folder_inst = folder + 'instance/'
-    if not os.path.exists(folder_inst): os.makedirs(folder_inst)
+    instance_folder = os.path.join(folder, 'instance/')
+    if not os.path.exists(instance_folder): os.makedirs(instance_folder)
     l = len(instances)
-    for i, mask in enumerate(instances):
+    i = 0
+    for name, mask in zip(frame_names, instances):
         # Convert from grayscale in 8 bits to 16 bits grayscale
-        cv2.imwrite(folder_inst + f'frame_{i:06d}.png', np.array(mask, dtype=np.uint16)*256)
+        cv2.imwrite(instance_folder + f'frame_{name}.png', np.array(mask, dtype=np.uint16)*256)
         printProgressBar(i+1, l, prefix = 'Inst. masks:', suffix = 'completed', length = 40)
+        i += 1
     # Save the bboxes
-    folder_bboxes = folder + 'bboxes/'
+    folder_bboxes = os.path.join(folder, 'bboxes/')
     if not os.path.exists(folder_bboxes): os.makedirs(folder_bboxes)
     # Create a diccionary where key is the color and value is the label
     colors_labels = {v: k for k, v in label_colors.items()}
     l = len(bboxes)
-    for i, bboxes_frame in enumerate(bboxes):
-        with open(folder_bboxes + f'frame_{i:06d}.txt', 'w') as f:
+    i = 0
+    for name, bboxes_frame in zip(frame_names, bboxes):
+        with open(folder_bboxes + f'frame_{name}.txt', 'w') as f:
             for bbox in bboxes_frame:
                 (x, y, w, h), color, inst_id = bbox
                 label = colors_labels[color]
                 f.write(f'{label} {inst_id} {x} {y} {w} {h}\n')
         printProgressBar(i+1, l, prefix = 'Bboxes     :', suffix = 'completed', length = 40)
+        i += 1
     print('    ... done!')
 
 # Create a zip file with the KITTI format
-def create_zip_kitti(kitti_folder, frames_per_zip, sem_masks_rgb, colors_file, label_colors, label_order):
+def create_zip_kitti(kitti_folder, frames_per_zip, frame_names, sem_masks_rgb, colors_file, label_colors, label_order):
     readme_content = """\
 This is a zip file with the KITTI format for importing to CVAT.
 (06/08/2024): There is a bug in how CVAT uses the KITTI format. The instance masks are not used.
@@ -195,18 +221,19 @@ The instance folder is really the same as the semantic folder but with integers 
     l = len(sem_masks_rgb)
     num_zips = l // frames_per_zip
     if l % frames_per_zip > 0:  num_zips += 1
+    fframe = int(frame_names[0])
     for b in range(num_zips):
         min_f, max_f = b*frames_per_zip, min((b+1)*frames_per_zip, len(sem_masks_rgb))-1
-        output_file = kitti_folder + f'kitti_frames_{min_f:06d}_to_{max_f:06d}.zip'
+        output_file = os.path.join(kitti_folder, f'kitti_frames_{min_f+fframe:06d}_to_{max_f+fframe:06d}.zip')
         # Create the zip file
         with zipfile.ZipFile(output_file, 'w') as zipf:
             # Go through the masks
             for i in range(min_f, max_f+1):
                 sem_rgb = sem_masks_rgb[i]
-                zipf.writestr(f'default/semantic_rgb/frame_{i:06d}.png', cv2.imencode('.png', cv2.cvtColor(sem_rgb, cv2.COLOR_RGB2BGR))[1].tobytes())
+                zipf.writestr(f'default/semantic_rgb/frame_{i+fframe:06d}.png', cv2.imencode('.png', cv2.cvtColor(sem_rgb, cv2.COLOR_RGB2BGR))[1].tobytes())
                 # There is a bug in how CVAT uses the KITTI format. The instance masks are not used. 
                 # The instance folder is really the same as the semantic folder but with integer instead of colors
-                zipf.writestr(f'default/instance/frame_{i:06d}.png', cv2.imencode('.png', rgb_semantic_to_int(sem_rgb, label_colors, label_order))[1].tobytes())
+                zipf.writestr(f'default/instance/frame_{i+fframe:06d}.png', cv2.imencode('.png', rgb_semantic_to_int(sem_rgb, label_colors, label_order))[1].tobytes())
                 printProgressBar(i+1, l, prefix = f'    ZIP {b+1}/{num_zips}:', suffix = 'completed', length = 40)
             # Add the label colors file
             with open(colors_file, 'r') as file:
@@ -216,18 +243,13 @@ The instance folder is really the same as the semantic folder but with integers 
     print(f'    Created {num_zips} ZIP files correctly.')
 
 # Load bboxes from file:
-def bboxes_from_file(folder, labels_colors):
-    if folder[-1] != '/': folder += '/'
-    # Take all the files in the folder
-    folder += 'bboxes/'
-    filenames = os.listdir(folder)
-    filenames.sort()
-    # Load the bboxes
+def bboxes_from_file(folder, labels_colors, frame_names):
+    folder = os.path.join(folder, 'bboxes/')
     print(f'    Loading bboxes from {folder}... ')
     bboxes = []
-    for file in filenames:
+    for file in frame_names:
         bboxes.append([])
-        with open(folder + file, 'r') as f:
+        with open(os.path.join(folder, f'frame_{file}.txt'), 'r') as f:
             for line in f:
                 # Format is: class num_inst bbox_x bbox_y bbox_w bbox_h
                 label, num_inst, x, y, w, h = line.split()
@@ -240,14 +262,14 @@ def bboxes_from_file(folder, labels_colors):
 # When working with long videos, CUDA may run out of memory
 # So we deactivate/activate the video frames by adding/removing an underscore
 # from the file extension name (.jpg or .jpg_)
-def create_temp_folder(input_folder, temp_folder):
-    # Copy the input folder to the temp folder
+def create_temp_folder(frames, frame_names, temp_folder):
+    # Copy the input folder to the temp folder and rename the files
+    # (to deactivate the frames)
     if not os.path.exists(temp_folder): os.makedirs(temp_folder)
-    os.system(f'cp {input_folder}/* {temp_folder}/')
-    # Rename all the files in the temp folder (deactivating the frames)
-    filenames = os.listdir(temp_folder)
-    for name in filenames:
-        os.rename(temp_folder + name, temp_folder + name + '_')
+    l = len(frames)
+    for i, name in enumerate(frame_names):
+        cv2.imwrite(os.path.join(temp_folder, name + '.jpg_'), frames[i])
+        printProgressBar(i+1, l, prefix = 'Temp folder:', suffix = 'completed', length = 40)
     return
 
 # Remove the temp folder
@@ -275,7 +297,7 @@ def text_bold(text):
     return f'\033[1m{text}\033[0m'
 
 # Print text in console with color:
-def print_console(current_label, label_colors, current_frame, total_frames, propagation_length):
+def print_console(current_label, label_colors, current_frame, init_video_frame, total_frames, propagation_length):
     print(chr(27) + '[2J')  # Clear screen
     print('='*70)
     print(text_color(' '*31 + text_bold('CONTROLS')))
@@ -304,7 +326,7 @@ def print_console(current_label, label_colors, current_frame, total_frames, prop
     [q] or [ESC]: Quit""")
     print('-'*70)
     print(' '*24+ 'Current frame: ', end='')
-    print(text_color(f'{current_frame}/{total_frames-1}'))
+    print(text_color(f'{current_frame}/{total_frames-1} ({init_video_frame+current_frame} in video)'))
     print(' '*24 +'Prompt progation: ', end='')
     print(text_color(f'{propagation_length}'))
     print('-'*70)
@@ -350,7 +372,7 @@ def print_out_of_memory_error(e):
 ##########################################################################
 
 # Frame navigation:
-def navigate_frames(frames, label_colors, sam_predictor, backup_folder, temp_folder, masks, bboxes, instances):
+def navigate_frames(frames, frame_names, init_video_frame, label_colors, sam_predictor, backup_folder, temp_folder, masks, bboxes, instances):
     # PARAMETERS
     H_frame, W_frame = frames[0].shape[:2]
     current_frame, total_frames = 0, len(frames)
@@ -360,13 +382,6 @@ def navigate_frames(frames, label_colors, sam_predictor, backup_folder, temp_fol
     # Possitive and negative points for SAM: points are dicts of {label : (x, y)}
     positive_points = [[] for _ in range(total_frames)]
     negative_points = [[] for _ in range(total_frames)]
-    # Masks and bboxes
-    if masks is None:
-        masks = [np.zeros((frames[0].shape[0], frames[0].shape[1], 3), dtype=np.uint8) for _ in range(total_frames)]
-    if bboxes is None:
-        bboxes = [[] for _ in range(total_frames)]
-    if instances is None:
-        instances = [np.zeros((frames[0].shape[0], frames[0].shape[1], 1), dtype=np.uint8) for _ in range(total_frames)]
 
     # Mouse callback function
     def click_event(event, x, y, flags, param):
@@ -434,26 +449,26 @@ def navigate_frames(frames, label_colors, sam_predictor, backup_folder, temp_fol
     # Screen loop
     propagation_length, propagation_changed = 250, False
     inf_state_init_frame, inference_state = 0, None
-    print_console(current_label, label_colors, current_frame, total_frames, propagation_length)
+    print_console(current_label, label_colors, current_frame, init_video_frame, total_frames, propagation_length)
     while True:
         # Wait for key press
         key = cv2.waitKey(0) & 0xFF
         if key == ord('q') or key == 27: break # 'q' or 'ESC' key
         elif key == ord(','):   # Previous frame
             current_frame = max(0, current_frame - 1)
-            print_console(current_label, label_colors, current_frame, total_frames, propagation_length)
+            print_console(current_label, label_colors, current_frame, init_video_frame, total_frames, propagation_length)
             update_frame(current_frame, show_mask, show_bboxes, show_instances)
         elif key == ord('.'):   # Next frame
             current_frame = min(total_frames - 1, current_frame + 1)
-            print_console(current_label, label_colors, current_frame, total_frames, propagation_length)
+            print_console(current_label, label_colors, current_frame, init_video_frame, total_frames, propagation_length)
             update_frame(current_frame, show_mask, show_bboxes, show_instances)
         elif key == ord(';'):   # Backward 10 frames
             current_frame = max(0, current_frame - 10)
-            print_console(current_label, label_colors, current_frame, total_frames, propagation_length)
+            print_console(current_label, label_colors, current_frame, init_video_frame, total_frames, propagation_length)
             update_frame(current_frame, show_mask, show_bboxes, show_instances)
         elif key == ord(':'):  # Forward 10 frames
             current_frame = min(total_frames - 1, current_frame + 10)
-            print_console(current_label, label_colors, current_frame, total_frames, propagation_length)
+            print_console(current_label, label_colors, current_frame, init_video_frame, total_frames, propagation_length)
             update_frame(current_frame, show_mask, show_bboxes, show_instances)
         elif key == ord('r') or key == ord('n'):  # Reset masks
             if key == ord('r'): processed_frames = [current_frame]
@@ -496,7 +511,7 @@ def navigate_frames(frames, label_colors, sam_predictor, backup_folder, temp_fol
         elif key == ord('l'):  # Change label
             current_label = labels_list[(labels_list.index(current_label) + 1) % len(labels_list)]
             update_frame(current_frame, show_mask, show_bboxes, show_instances)
-            print_console(current_label, label_colors, current_frame, total_frames, propagation_length)
+            print_console(current_label, label_colors, current_frame, init_video_frame, total_frames, propagation_length)
         elif (key == ord('f') or key == ord('p')) and positive_points[current_frame] != []:   # Call SAM 2
             # 1. REDFINE THE INFERENCE STATE IF NECESSARY
             # If it is not defined / if current frame is not in the range / 
@@ -511,8 +526,8 @@ def navigate_frames(frames, label_colors, sam_predictor, backup_folder, temp_fol
                 print('> Establishing inference state for SAM 2...')
                 del inference_state # for releasing space
                 try:
-                    inference_state = create_SAM_inference_state(sam_predictor, temp_folder,
-                            current_frame, min(current_frame + propagation_length, total_frames-1))
+                    inference_state = create_SAM_inference_state(sam_predictor, temp_folder, current_frame, 
+                            min(current_frame + propagation_length, total_frames-1), init_video_frame)
                 except RuntimeError as e:
                     if 'out of memory' in str(e):
                         print_out_of_memory_error(e)
@@ -539,6 +554,7 @@ def navigate_frames(frames, label_colors, sam_predictor, backup_folder, temp_fol
                 # Create the RGB mask
                 rgb_mask = np.zeros((H_frame, W_frame, 3), dtype=np.uint8)
                 for label in boolean_masks.keys():
+                    print(rgb_mask.shape, boolean_masks[label].shape)
                     rgb_mask[boolean_masks[label]] = label_colors[label]
                 # Show it in new window ABOVE the main window
                 x, y, width, height = cv2.getWindowImageRect('Video')
@@ -586,23 +602,23 @@ def navigate_frames(frames, label_colors, sam_predictor, backup_folder, temp_fol
             show_instances = not show_instances
             update_frame(current_frame, show_mask, show_bboxes, show_instances)
         elif key == ord('k'):   # Create backup
-            save_masks(backup_folder, masks, instances, bboxes, label_colors, is_backup=True)
+            save_masks(backup_folder, frame_names, masks, instances, bboxes, label_colors, is_backup=True)
         elif key == ord('+'):   # Increase propation length by 1
             propagation_length += 1
             propagation_changed = True
-            print_console(current_label, label_colors, current_frame, total_frames, propagation_length)
+            print_console(current_label, label_colors, current_frame, init_video_frame, total_frames, propagation_length)
         elif key == ord('-'):   # Decrease propation length by 1
             propagation_length = max(1, propagation_length - 1)
             propagation_changed = True
-            print_console(current_label, label_colors, current_frame, total_frames, propagation_length)
+            print_console(current_label, label_colors, current_frame, init_video_frame, total_frames, propagation_length)
         elif key == ord('*'):   # Increase propation length by 30
             propagation_length += 30
             propagation_changed = True
-            print_console(current_label, label_colors, current_frame, total_frames, propagation_length)
+            print_console(current_label, label_colors, current_frame, init_video_frame, total_frames, propagation_length)
         elif key == ord('_'):   # Decrease propation length by 30
             propagation_length = max(1, propagation_length - 30)
             propagation_changed = True
-            print_console(current_label, label_colors, current_frame, total_frames, propagation_length)
+            print_console(current_label, label_colors, current_frame, init_video_frame, total_frames, propagation_length)
         elif key == ord('d'):   # Just for debugging
             print(np.unique(instances[current_frame]))
 
@@ -614,15 +630,15 @@ def navigate_frames(frames, label_colors, sam_predictor, backup_folder, temp_fol
 ##########################################################################
 
 # Function to create the inference state for SAM 2 processing
-def create_SAM_inference_state(sam_predictor, temp_folder, first_frame, last_frame):
+def create_SAM_inference_state(sam_predictor, temp_folder, init_frame, last_frame, init_video_frame):
     # Deactivate the inference state for the frames that are not in the range
     frames_name = os.listdir(temp_folder)
     for name in frames_name:
         extension = os.path.splitext(name)[-1]
         if extension in ['.jpg', '.jpeg', '.JPG', '.JPEG', '.jpg_', '.jpeg_', '.JPG_', '.JPEG_']:
-            frame_number = int(os.path.splitext(name)[0])
+            frame_number = int(os.path.splitext(name)[0]) - init_video_frame
             # Activate the frames within the range (changing the extension from .jpg_ to .jpg)
-            if frame_number >= first_frame and frame_number <= last_frame:
+            if frame_number >= init_frame and frame_number <= last_frame:
                 if extension[-1] == '_':
                     old_name = os.path.join(temp_folder, name)
                     os.rename(old_name, old_name[:-1])
@@ -731,6 +747,7 @@ def instances2rgb(instance_map, instance_colors):
 def bboxes_from_masks(sem_masks, instances):
     print(f'    Computing bboxes from masks...')
     bboxes = [[] for _ in range(len(sem_masks))]
+    l = len(sem_masks)
     for i in range(len(sem_masks)):
         unique_instances = np.unique(instances[i])[1:] # 0 is the background
         for inst_id in unique_instances:
@@ -750,6 +767,7 @@ def bboxes_from_masks(sem_masks, instances):
                 fcolor = colors[np.argsort(counts)[-2]]
             # Save the bbox
             bboxes[i].append(((x_min, y_min, x_max-x_min+1, y_max-y_min+1), (int(fcolor[0]), int(fcolor[1]), int(fcolor[2])), inst_id))
+        printProgressBar(i+1, l, prefix = 'Bboxes:     ', suffix = 'completed', length = 40)
     print('    ... done!')
     return bboxes
 
@@ -769,51 +787,61 @@ if __name__ == '__main__':
 
     # 1. Read video:
     print(f'> Opening video {args.input_folder}...')
-    frames = frames_from_folder(args.input_folder)
-    if frames is None:
-        print(f'! Error opening video {args.input_folder}')
+    if args.resize_factor <= 0 or args.resize_factor > 1:
+        print(text_color(f'! Error: Resize factor must be in the range (0, 1].', error_color=True))
         exit(1)
-    print(f'    Video opened with {len(frames)} frames.')
+    elif args.init_frame < 0 or (args.end_frame != -1 and args.init_frame > args.end_frame):
+        print(text_color(f'! Error: Initial frame and end frame must be positive and init_frame <= end_frame.', error_color=True))
+        exit(1)
+
+    frame_names, frames = frames_from_folder(args.input_folder, args.resize_factor, 
+                                        args.init_frame, args.end_frame)
+    
+    if frames is None:
+        print(text_color(f'! Error opening video {args.input_folder}', error_color=True))
+        exit(1)
+    total_frames = len(frames)
+    print(f'    Video opened with {total_frames} frames of size {frames[0].shape[1]}x{frames[0].shape[0]}.')
 
     # 2. Read labels (dict where key is label name and value is RGB color)
     label_order, label_colors = labels_colors_from_file(args.label_colors)
 
     # 3. Load masks from folder:
-    if args.load_folder[-1] != '/': args.load_folder += '/'
     loaded_masks, loaded_bboxes, loaded_instances = None, None, None
     if os.path.exists(args.load_folder):
         answer = input(text_color(f'> Do you want to load masks from {args.load_folder}? (y/n): '))
         while answer.lower() != 'y' and answer.lower() != 'n':
             answer = input(text_color('    ! Please answer with \'y\' or \'n\': ', error_color=True))
         if answer.lower() == 'y':
-            loaded_masks, loaded_instances = load_masks(args.load_folder)
+            loaded_masks, loaded_instances = load_masks(args.load_folder, frames[0].shape[:2], frame_names)
 
-            if loaded_masks is not None and len(frames) != len(loaded_masks):
-                print(text_color(f'! Error: Number of frames in video and masks do not match ({len(frames)} != {len(loaded_masks)})', error_color=True))
-                if len(loaded_masks) < len(frames):
-                    answer = input(text_color('> Continue creating new masks? (y/n): '))
-                    while answer.lower() != 'y' and answer.lower() != 'n':
-                        answer = input(text_color('    ! Please answer with \'y\' or \'n\': ', error_color=True))
-                    if answer.lower() == 'y':
-                        # Complete the loaded masks with empty masks
-                        loaded_masks += [np.zeros((frames[0].shape[0], frames[0].shape[1], 3), dtype=np.uint8) for _ in range(len(frames) - len(loaded_masks))]
-                        loaded_instances += [np.zeros((frames[0].shape[0], frames[0].shape[1], 1), dtype=np.uint8) for _ in range(len(frames) - len(loaded_instances))]
-                    else: exit(1)
-            # If the folder loadfolder/bboxes exitsts and its not empty
-            if os.path.exists(args.load_folder + 'bboxes/') and os.listdir(args.load_folder + 'bboxes/'):
-                loaded_bboxes = bboxes_from_file(args.load_folder, label_colors)
+            if loaded_masks is None:    # If the masks could not be loaded
+                print(text_color(f'! Error: Masks could not be loaded from {args.load_folder}', error_color=True))
+                exit(1)
+                
+            # If the folder load_folder/bboxes exitsts and its not empty
+            bboxes_path = os.path.join(args.load_folder, 'bboxes/')
+            if os.path.exists(bboxes_path) and os.listdir(bboxes_path):
+                loaded_bboxes = bboxes_from_file(args.load_folder, label_colors, frame_names)
             else:
                 loaded_bboxes = bboxes_from_masks(loaded_masks, loaded_instances)
+
+    # If the masks are not loaded, create empty lists
+    if loaded_masks is None:
+        loaded_masks = [np.zeros((frames[0].shape[0], frames[0].shape[1], 3), dtype=np.uint8) for _ in range(total_frames)]
+    if loaded_bboxes is None:
+        loaded_bboxes = [[] for _ in range(total_frames)]
+    if loaded_instances is None:
+        loaded_instances = [np.zeros((frames[0].shape[0], frames[0].shape[1], 1), dtype=np.uint8) for _ in range(total_frames)]
 
     # 4. Initialize the SAM model:
     make_slow_imports()
     sam_predictor = init_SAM_predictor(args.sam_model_folder, args.model_size)
     # Create the temporal folder for the inference state
-    TEMP_FOLDER = 'temp/'
-    create_temp_folder(args.input_folder, TEMP_FOLDER)
+    create_temp_folder(frames, frame_names, TEMP_FOLDER)
 
     # 5. Navigate through frames and click the points
-    sem_masks, instances, bboxes = navigate_frames(frames, label_colors, sam_predictor, 
+    sem_masks, instances, bboxes = navigate_frames(frames, frame_names, args.init_frame, label_colors, sam_predictor, 
             args.backup_folder, TEMP_FOLDER, loaded_masks, loaded_bboxes, loaded_instances)
 
     # 6. Ask for saving the masks
@@ -821,7 +849,7 @@ if __name__ == '__main__':
     while answer.lower() != 'y' and answer.lower() != 'n':
         answer = input(text_color('    ! Please answer with \'y\' or \'n\': ', error_color=True))
     if answer.lower() == 'y':
-        save_masks(args.output_folder, sem_masks, instances, bboxes, label_colors)
+        save_masks(args.output_folder, frame_names, sem_masks, instances, bboxes, label_colors)
         # 7. Ask for exporting to KITTI format
         answer = input(text_color('> Do you want to export in KITTI format (for importing to CVAT)? (y/n): '))
         while answer.lower() != 'y' and answer.lower() != 'n':
@@ -830,21 +858,20 @@ if __name__ == '__main__':
             kitti_folder = input('    Output file for the KITTI exportation [default: cvat/]: ')
             # Default folder
             if kitti_folder == '':  kitti_folder = 'cvat/'
-            elif kitti_folder[-1] != '/':   kitti_folder += '/'
             # Ask for the number of frames per zip file
-            frames_per_zip = input(f'    Frames per ZIP file [default: 300, total: {len(frames)}]: ')
+            frames_per_zip = input(f'    Frames per ZIP file [default: 300, total: {total_frames}]: ')
             while frames_per_zip != '' and not frames_per_zip.isdigit():
                 frames_per_zip = input(text_color('    ! Please enter a number: ', error_color=True))
             # Default value
             if frames_per_zip == '':    frames_per_zip = 300
             else: frames_per_zip = int(frames_per_zip)
             # Check the number of frames per zip
-            if frames_per_zip > len(frames):
-                frames_per_zip = len(frames)
+            if frames_per_zip > total_frames:
+                frames_per_zip = total_frames
             # If folder does not exist, create it
             if not os.path.exists(kitti_folder): os.makedirs(kitti_folder)
             # Save the masks in KITTI format
-            create_zip_kitti(kitti_folder, frames_per_zip, sem_masks, args.label_colors, label_colors, label_order)
+            create_zip_kitti(kitti_folder, frames_per_zip, frame_names, sem_masks, args.label_colors, label_colors, label_order)
 
     # Remove the temporal folder and exit
     remove_temp_folder(TEMP_FOLDER)
