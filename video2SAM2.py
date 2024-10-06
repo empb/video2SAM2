@@ -172,7 +172,12 @@ def save_masks(folder, frame_names, sem_masks, instances, bboxes, label_colors, 
     if is_backup:   
         folder = os.path.join(folder, time.strftime('%Y%m%d_%H%M%S') + '/')
     elif os.path.exists(folder):        # if is not a backup and folder exists, clear the files
-        os.system(f'rm -r {folder}*')
+        # Ask for confirmation
+        answer = input(text_color(f' ! Remove folder {folder} before saving? (y/n): '))
+        while answer.lower() != 'y' and answer.lower() != 'n':
+            answer = input(text_color('    ! Please answer with \'y\' or \'n\': ', error_color=True))
+        if answer.lower() == 'y':
+            os.system(f'rm -r {folder}*')
     # Loop over masks and save them
     print(f'Saving masks in {folder}... ')
     # Save the semantic masks
@@ -632,6 +637,7 @@ def navigate_frames(frames, frame_names, init_video_frame, label_colors, sam_pre
 def create_SAM_inference_state(sam_predictor, temp_folder, init_frame, last_frame, init_video_frame):
     # Deactivate the inference state for the frames that are not in the range
     frames_name = os.listdir(temp_folder)
+    frames_name.sort()
     for name in frames_name:
         extension = os.path.splitext(name)[-1]
         if extension in ['.jpg', '.jpeg', '.JPG', '.JPEG', '.jpg_', '.jpeg_', '.JPG_', '.JPEG_']:
@@ -844,7 +850,7 @@ if __name__ == '__main__':
             args.backup_folder, TEMP_FOLDER, loaded_masks, loaded_bboxes, loaded_instances)
 
     # 6. Ask for saving the masks
-    answer = input(text_color('> Do you want to save the masks?\n  (Process will overwrite files in \'' + args.output_folder + '\') (y/n): '))
+    answer = input(text_color('> Do you want to save the masks? (y/n): '))
     while answer.lower() != 'y' and answer.lower() != 'n':
         answer = input(text_color('    ! Please answer with \'y\' or \'n\': ', error_color=True))
     if answer.lower() == 'y':
