@@ -1,10 +1,5 @@
 #!/usr/bin/env python
 
-##########################################################################
-# > ./video2SAM2.py --input_folder video2/
-##########################################################################
-
-# Normal needed imports:
 import os
 import requests
 import argparse
@@ -111,7 +106,7 @@ def frames_from_folder(folder, resize_factor, init_frame, end_frame):
 # Read colors from file:
 # return a list with the order of the labels (to identify each label with an integer)
 # and a dictionary where key is the label name and value is the RGB color 
-def labels_colors_from_file(file_path):
+def label_colors_from_file(file_path):
     labels = {}
     label_order = []
     with open(file_path, 'r') as file:
@@ -809,7 +804,7 @@ if __name__ == '__main__':
     print(f'    Video opened with {total_frames} frames of size {frames[0].shape[1]}x{frames[0].shape[0]}.')
 
     # 2. Read labels (dict where key is label name and value is RGB color)
-    label_order, label_colors = labels_colors_from_file(args.label_colors)
+    label_order, label_colors = label_colors_from_file(args.label_colors)
 
     # 3. Load masks from folder:
     loaded_masks, loaded_bboxes, loaded_instances = None, None, None
