@@ -23,7 +23,7 @@ def resize_images(images_dir, output_dir, resize_factor):
 
 # Function to parse command line arguments
 def parse_arguments():
-    parser = argparse.ArgumentParser(description='Draw bounding boxes on images using txt files.')
+    parser = argparse.ArgumentParser(description='Resize images in a directory.')
     parser.add_argument('--input_folder', required=True, help='Directory with the input images')
     parser.add_argument('--output_folder', required=True, help='Directory where the processed images will be saved')
     parser.add_argument('--resize_factor', type=float, required=True, help='Resize factor for the frames')
