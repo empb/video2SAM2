@@ -12,7 +12,7 @@ def read_bounding_boxes(bbox_file):
         for line in f:
             parts = line.strip().split()
             # In case the class name has more than one word
-            class_name = ' '.join(parts[0:-5])
+            class_name = parts[0]
             bounding_boxes.append(class_name)
     return bounding_boxes
 
@@ -74,8 +74,8 @@ if __name__ == '__main__':
                 prefix = mmatch.group(1)
                 sums[prefix] += value
     
-    print('-'*32)
-    print('Bounding boxes grouped by class:')
-    for prefix, total in sums.items():
-        print(f'    {prefix}: {total}')
+        print('-'*32)
+        print('Bounding boxes grouped by class:')
+        for prefix, total in sums.items():
+            print(f'    {prefix}: {total}')
 
